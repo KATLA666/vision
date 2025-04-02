@@ -4,9 +4,6 @@
 
 #include <libcamera/libcamera.h>
 
-#include <X11/Xlib.h>
-#include <X11/Xutil.h>
-
 #include <drm.h>
 #include <drm_fourcc.h>
 #include <drm_mode.h>
@@ -22,14 +19,14 @@ struct EGLUtil
 	EGLDisplay display;
 	EGLSurface surface;
 	EGLContext context;
-	EGLConfig  config;  //X11 config (maybe can clean this up??)
 	EGLConfig *configs; //DRM config
 	
 	EGLint major, minor;
 	EGLint vid;
 	EGLint num_configs;
 	
-	
+	GLuint FramebufferName;
+	GLuint FramebufferName2;
 };
 
 static const EGLint ctx_attribs[] = {
@@ -45,13 +42,6 @@ static const EGLint conf_attribs[] = {
 	EGL_ALPHA_SIZE, 0,
 	EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
 	EGL_NONE
-};
-
-struct X11Util
-{
-	Display *display;
-	Atom wm_delete_window;
-	Window window;
 };
 
 struct DRMUtil

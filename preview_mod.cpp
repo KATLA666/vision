@@ -1,8 +1,5 @@
 #include "preview.h"
 
-#include <X11/Xlib.h>
-#include <X11/Xutil.h>
-
 #include <drm.h>
 #include <drm_fourcc.h>
 #include <drm_mode.h>
@@ -23,21 +20,13 @@
 #include <errno.h>
 #include <iostream>
 #include <unistd.h>
-#include <mutex>
 
 #define ERRSTR strerror(errno)
 
 //Setup Variables
-
-std::mutex renderMutex;
-
-GLuint FramebufferName;
-GLuint FramebufferName2;
-
 EGLUtil egl;
 DRMUtil drm;
 GBMUtil gbm;
-X11Util X11;
 bool first_time_ = true;
 std::string display_mode = "DRM";
 char const *name;
@@ -102,54 +91,88 @@ static GLint link_program(GLint vs, GLint fs)
 
 void gl_setup()
 {
-	float w_factor = 1536 / (float)2160;
-	float h_factor = 864 / (float)1200;
-	float max_dimension = std::max(w_factor, h_factor);
-	w_factor /= max_dimension;
-	h_factor /= max_dimension;
-	char vs[256];
-	snprintf(vs, sizeof(vs),
-			 "attribute vec4 pos;\n"
-			 "varying vec2 texcoord;\n"
-			 "\n"
-			 "void main() {\n"
-			 "  gl_Position = pos;\n"
-			 "  texcoord.x = pos.x / %f + 0.5;\n"
-			 "  texcoord.y = 0.5 - pos.y / %f;\n"
-			 "}\n",
-			 2.0 * w_factor, 2.0 * h_factor);
-	vs[sizeof(vs) - 1] = 0;
-	GLint vs_s = compile_shader(GL_VERTEX_SHADER, vs);
-	const char *fs = "#extension GL_OES_EGL_image_external : enable\n"
-					 "precision mediump float;\n"
-					 "uniform samplerExternalOES s;\n"
-					 "varying vec2 texcoord;\n"
-					 "void main() {\n"
-					 "  gl_FragColor = texture2D(s, texcoord);\n"
-					 "}\n";
-	GLint fs_s = compile_shader(GL_FRAGMENT_SHADER, fs);
-	GLint prog = link_program(vs_s, fs_s);
+    // Verhältnisberechnung für das Viewport-Setup
+    float w_factor = 1536 / (float)2160;
+    float h_factor = 864 / (float)1200;
+    float max_dimension = std::max(w_factor, h_factor);
+    w_factor /= max_dimension;
+    h_factor /= max_dimension;
 
-	glUseProgram(prog);
+    // Vertex Shader Source Code
+    const char *vs_src = R"(
+        attribute vec4 pos;
+        varying vec2 texcoord;
 
-	static const float verts[] = { -w_factor, -h_factor, w_factor, -h_factor, w_factor, h_factor, -w_factor, h_factor };
-	glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, verts);
-	glEnableVertexAttribArray(0);
-	glGenTextures(1, &FramebufferName);
-	//glBindTexture(GL_TEXTURE_EXTERNAL_OES, egl.FramebufferName);
-	glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-	glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-	glGenTextures(1, &FramebufferName2);
-	//glBindTexture(GL_TEXTURE_EXTERNAL_OES, egl.FramebufferName2);
-	glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-	glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        void main() {
+            gl_Position = pos;
+            texcoord.x = pos.x / 2.0 + 0.5;
+            texcoord.y = 0.5 - pos.y / 2.0;
+        }
+    )";
 
-	//deleting of shaders and program
-	glDeleteShader(vs_s);
-	glDeleteShader(fs_s);
-	glDeleteProgram(prog);
+    // Fragment Shader Source Code
+    const char *fs_src = R"(
+        #extension GL_OES_EGL_image_external : enable
+        precision mediump float;
+        uniform samplerExternalOES s;
+        varying vec2 texcoord;
 
-	
+        void main() {
+            gl_FragColor = texture2D(s, texcoord);
+        }
+    )";
+
+    // Kompilierung und Verlinkung der Shader
+    GLint vs = compile_shader(GL_VERTEX_SHADER, vs_src);
+    GLint fs = compile_shader(GL_FRAGMENT_SHADER, fs_src);
+    GLint prog = link_program(vs, fs);
+    
+    // Benutze das erstellte Programm
+    glUseProgram(prog);
+
+    // Vertex-Daten für das Quadrat
+    static const float verts[] = {
+        -w_factor, -h_factor,   // unteres linkes Eck
+         w_factor, -h_factor,   // unteres rechtes Eck
+         w_factor,  h_factor,   // oberes rechtes Eck
+        -w_factor,  h_factor    // oberes linkes Eck
+    };
+
+    // Vertex-Array und Vertex-Buffer-Objekt
+    GLuint vbo;
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STATIC_DRAW);
+
+    // Setze den Vertex-Attribut-Zeiger und aktiviere ihn
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, 0);
+
+    // Erstelle und konfiguriere die Texturen
+    GLuint textures[2];
+    glGenTextures(2, textures);
+
+    // Textur 1 für External OES
+    glBindTexture(GL_TEXTURE_EXTERNAL_OES, textures[0]);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    // Textur 2 für External OES (optional)
+    glBindTexture(GL_TEXTURE_EXTERNAL_OES, textures[1]);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    // Speicher freigeben: Shader und Programme löschen
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    glDeleteProgram(prog);
+
+    // Unbind Buffer
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
 }
 
 static drmModeConnector *getConnector(drmModeRes *resources)
@@ -250,105 +273,6 @@ void findPlane()
 		throw;
 	}
 	drmModeFreePlaneResources(planes);
-
-}
-
-void setupX11(char const *name, int x, int y, int width, int height)
-{
-	int screen_num = DefaultScreen(X11.display);
-	XSetWindowAttributes attr;
-	unsigned long mask;
-	Window root = RootWindow(X11.display, screen_num);
-	//int screen_width = DisplayWidth(X11.display, screen_num); //these two are unused as of now
-	//int screen_height = DisplayHeight(X11.display, screen_num);
-	
-	if (!eglChooseConfig(egl.display, conf_attribs, &egl.config, 1, &egl.num_configs))
-		printf("couldn't get an EGL visual config");
-
-	if (!eglGetConfigAttrib(egl.display, egl.config, EGL_NATIVE_VISUAL_ID, &egl.vid))
-		printf("eglGetConfigAttrib() failed\n");
-
-	XVisualInfo visTemplate = {};
-	visTemplate.visualid = (VisualID)egl.vid;
-	int num_visuals;
-	XVisualInfo *visinfo = XGetVisualInfo(X11.display, VisualIDMask, &visTemplate, &num_visuals);
-
-	/* window attributes */
-	attr.background_pixel = 0;
-	attr.border_pixel = 0;
-	attr.colormap = XCreateColormap(X11.display, root, visinfo->visual, AllocNone);
-	attr.event_mask = StructureNotifyMask | ExposureMask | KeyPressMask;
-	/* XXX this is a bad way to get a borderless window! */
-	mask = CWBackPixel | CWBorderPixel | CWColormap | CWEventMask;
-
-	X11.window = XCreateWindow(X11.display, root, x, y, width, height, 0, visinfo->depth, InputOutput, visinfo->visual,
-							mask, &attr);
-
-	/////Make the window borderless (but can't move it around)
-	//static const unsigned MWM_HINTS_DECORATIONS = (1 << 1);
-	//static const int PROP_MOTIF_WM_HINTS_ELEMENTS = 5;
-
-	//typedef struct
-	//{
-		//unsigned long flags;
-		//unsigned long functions;
-		//unsigned long decorations;
-		//long inputMode;
-		//unsigned long status;
-	//} PropMotifWmHints;
-
-	//PropMotifWmHints motif_hints;
-	//Atom prop, proptype;
-	//unsigned long flags = 0;
-
-	///* setup the property */
-	//motif_hints.flags = MWM_HINTS_DECORATIONS;
-	//motif_hints.decorations = flags;
-
-	///* get the atom for the property */
-	//prop = XInternAtom(X11.display, "_MOTIF_WM_HINTS", True);
-
-	///* not sure this is correct, seems to work, XA_WM_HINTS didn't work */
-	//proptype = prop;
-
-	//XChangeProperty(X11.display, X11.window, /* display, window */
-					//prop, proptype, /* property, type */
-					//32, /* format: 32-bit datums */
-					//PropModeReplace, /* mode */
-					//(unsigned char *)&motif_hints, /* data */
-					//PROP_MOTIF_WM_HINTS_ELEMENTS /* nelements */
-	//);
-
-	/* set hints and properties */
-	{
-		XSizeHints sizehints;
-		sizehints.x = x;
-		sizehints.y = y;
-		sizehints.width = width;
-		sizehints.height = height;
-		sizehints.flags = USSize | USPosition;
-		XSetNormalHints(X11.display, X11.window, &sizehints);
-		XSetStandardProperties(X11.display, X11.window, name, name, None, (char **)NULL, 0, &sizehints);
-	}
-			
-	eglBindAPI(EGL_OPENGL_ES_API);
-
-	egl.context = eglCreateContext(egl.display, egl.config, EGL_NO_CONTEXT, ctx_attribs);
-	
-	if (!egl.context)
-		printf("eglCreateContext failed\n");
-		
-	XFree(visinfo);
-
-	XMapWindow(X11.display, X11.window);
-
-	// This stops the window manager from closing the window, so we get an event instead.
-	X11.wm_delete_window = XInternAtom(X11.display, "WM_DELETE_WINDOW", False);
-	XSetWMProtocols(X11.display, X11.window, &X11.wm_delete_window, 1);
-
-	egl.surface = eglCreateWindowSurface(egl.display, egl.config, reinterpret_cast<EGLNativeWindowType>(X11.window), NULL);
-	if (!egl.surface)
-		printf("eglCreateWindowSurface failed\n");
 }
 
 void setupDRM()
@@ -416,15 +340,15 @@ int makeWindow(char const *name, int x, int y, int width, int height)
 		drm.resources = drmModeGetResources(drm.fd);
 	}
 
-	if (!drmIsMaster(drm.fd)){ //X11 is master, so render to X11
+	/* if (!drmIsMaster(drm.fd)){ //X11 is master, so render to X11
 		X11.display = XOpenDisplay(NULL);
 		if (!X11.display)
 			printf("Couldn't open X display");
 		egl.display = eglGetDisplay((EGLNativeDisplayType)X11.display);
 		if (!egl.display)
 			printf("eglGetDisplay() failed");
-		display_mode = "X11";
-	}else{ //DRM is master, continue DRM setup
+		display_mode = "X11";} */
+	else{ //DRM is master, continue DRM setup
 		drm.connector = getConnector(drm.resources);
 		if (!drm.connector) // we could be fancy and listen for hotplug events and wait for connector..
 		{
@@ -489,9 +413,9 @@ int makeWindow(char const *name, int x, int y, int width, int height)
 	if (!eglInitialize(egl.display, &egl.major, &egl.minor))
 		printf("eglInitialize() failed");
 	
-	if (display_mode == "X11"){
-		setupX11(name, x, y, width, height);
-	}else
+	/* if (display_mode == "X11"){
+		setupX11(name, x, y, width, height);} */
+	else
 		setupDRM();
 		
 	// We have to do eglMakeCurrent in the thread where it will run, but we must do it
@@ -503,12 +427,12 @@ int makeWindow(char const *name, int x, int y, int width, int height)
 	// This "undoes" the previous eglMakeCurrent.
 	eglMakeCurrent(egl.display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
 	
-	if (display_mode == "X11")
-		glViewport(0, 0, drm.mode.hdisplay, drm.mode.vdisplay);
+	/* if (display_mode == "X11")
+		glViewport(0, 0, drm.mode.hdisplay, drm.mode.vdisplay); */
 	
 	//printf("here\n");
+		
 	return 0;
-	
 }
 
 void makeBuffer(int fd, libcamera::StreamConfiguration const &info, libcamera::FrameBuffer *buffer, int camera_num)
@@ -522,10 +446,10 @@ void makeBuffer(int fd, libcamera::StreamConfiguration const &info, libcamera::F
 		first_time_ = false;
 	}
 
-	EGLint attribs[] = { // Hier wird der Buffer genommen und in einem attribut gebuden
+	EGLint attribs[] = {
 		EGL_WIDTH, static_cast<EGLint>(info.size.width),
 		EGL_HEIGHT, static_cast<EGLint>(info.size.height),
-		EGL_LINUX_DRM_FOURCC_EXT, /* DRM_FORMAT_NV12 *//* DRM_FORMAT_SRGGB10 */DRM_FORMAT_YUV420,
+		EGL_LINUX_DRM_FOURCC_EXT, DRM_FORMAT_YUV420,
 		EGL_DMA_BUF_PLANE0_FD_EXT, fd,
 		EGL_DMA_BUF_PLANE0_OFFSET_EXT, 0,
 		EGL_DMA_BUF_PLANE0_PITCH_EXT, static_cast<EGLint>(info.stride),
@@ -535,8 +459,8 @@ void makeBuffer(int fd, libcamera::StreamConfiguration const &info, libcamera::F
 		EGL_DMA_BUF_PLANE2_FD_EXT, fd,
 		EGL_DMA_BUF_PLANE2_OFFSET_EXT, static_cast<EGLint>(info.stride * info.size.height + (info.stride / 2) * (info.size.height / 2)),
 		EGL_DMA_BUF_PLANE2_PITCH_EXT, static_cast<EGLint>(info.stride / 2),
-		EGL_YUV_COLOR_SPACE_HINT_EXT, EGL_ITU_REC709_EXT/* EGL_ITU_REC601_EXT */, //maybe 701?
-		EGL_SAMPLE_RANGE_HINT_EXT, EGL_YUV_FULL_RANGE_EXT/* EGL_YUV_NARROW_RANGE_EXT */, //maybe full?
+		EGL_YUV_COLOR_SPACE_HINT_EXT, EGL_ITU_REC601_EXT, //maybe 701?
+		EGL_SAMPLE_RANGE_HINT_EXT, EGL_YUV_NARROW_RANGE_EXT, //maybe full?
 		EGL_NONE
 	};
 
@@ -544,135 +468,90 @@ void makeBuffer(int fd, libcamera::StreamConfiguration const &info, libcamera::F
 	if (!image)
 		throw std::runtime_error("failed to import fd " + std::to_string(fd));
 
-	if (camera_num == 1){
-		/* if (glIsTexture(FramebufferName)){
-			glDeleteTextures(1, &FramebufferName);}
-		glDeleteTextures(1, &FramebufferName);
-		glGenTextures(1, &FramebufferName); */
-		glBindTexture(GL_TEXTURE_EXTERNAL_OES, FramebufferName);}
-	else if (camera_num == 2){
-		/* if (glIsTexture(FramebufferName2)){
-			glDeleteTextures(1, &FramebufferName2);}
-		glDeleteTextures(1, &FramebufferName2);
-		glGenTextures(1, &FramebufferName2); */
-		glBindTexture(GL_TEXTURE_EXTERNAL_OES, FramebufferName2);}
+	if (camera_num == 1)
+		glBindTexture(GL_TEXTURE_EXTERNAL_OES, egl.FramebufferName);
+	else if (camera_num == 0)
+		glBindTexture(GL_TEXTURE_EXTERNAL_OES, egl.FramebufferName2);
 	
 	//glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
 	//glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-	glEGLImageTargetTexture2DOES(GL_TEXTURE_EXTERNAL_OES, image); //Die gebundenen Textur wird mit den Generierten image mit buffer gefüllt
+	glEGLImageTargetTexture2DOES(GL_TEXTURE_EXTERNAL_OES, image);
 
 	eglDestroyImageKHR(egl.display, image);
 }
 
 void gbmSwapBuffers()
 {
-	//std::unique_lock<std::mutex> lock(renderMutex); adding Mutex works great, but poor performance
+	// Lock the front buffer
 	struct gbm_bo *bo = gbm_surface_lock_front_buffer(gbm.surface);
+	if (!bo)
+		throw std::runtime_error("Failed to lock front buffer");
+
 	uint32_t handle = gbm_bo_get_handle(bo).u32;
 	uint32_t pitch = gbm_bo_get_stride(bo);
 	uint32_t fb;
-	
-	uint32_t offsets[4] =
-		{ 0, pitch * drm.mode.vdisplay, pitch * drm.mode.vdisplay + (pitch / 2) * (drm.mode.vdisplay / 2) };
-	uint32_t pitches[4] = { pitch, pitch / 2, pitch / 2 };
-	uint32_t handles[4] = { handle, handle, handle };
-	
-	//drmModeAddFB(drmfd_, drm_mode_.hdisplay, drm_mode_.vdisplay, 24, 32, pitch, handle, &fb);
-	drmModeAddFB2(drm.fd, drm.mode.hdisplay, drm.mode.vdisplay,GBM_FORMAT_XRGB8888,
-	              handles, pitches, offsets, &fb, 0);
-	//drmModeSetCrtc(drm.fd, crtc->crtc_id, fb, 0, 0, &conId, 1, &drm.mode);
-	
-	if (drmModeSetPlane(drm.fd, drm.planeId, drm.crtcId, fb, 0, 0, 0, drm.mode.hdisplay, drm.mode.vdisplay, 0, 0,
-						drm.mode.hdisplay << 16, drm.mode.vdisplay << 16))
+
+	// Prepare the framebuffer creation parameters
+	uint32_t offsets[4] = { 0 };  // No offsets needed for XRGB format
+	uint32_t pitches[4] = { pitch };  // Only one pitch needed for XRGB format
+	uint32_t handles[4] = { handle };  // Only one handle needed for XRGB format
+
+	// Add framebuffer
+	int ret = drmModeAddFB2(drm.fd, drm.mode.hdisplay, drm.mode.vdisplay, GBM_FORMAT_XRGB8888,
+							handles, pitches, offsets, &fb, 0);
+	if (ret)
+	{
+		gbm_surface_release_buffer(gbm.surface, bo);
+		throw std::runtime_error("drmModeAddFB2 failed: " + std::string(ERRSTR));
+	}
+
+	// Set the plane
+	ret = drmModeSetPlane(drm.fd, drm.planeId, drm.crtcId, fb, 0, 0, 0, drm.mode.hdisplay, drm.mode.vdisplay,
+						  0, 0, drm.mode.hdisplay << 16, drm.mode.vdisplay << 16);
+	if (ret)
+	{
+		drmModeRmFB(drm.fd, fb);
+		gbm_surface_release_buffer(gbm.surface, bo);
 		throw std::runtime_error("drmModeSetPlane failed: " + std::string(ERRSTR));
-				
+	}
+
+	// Release previous buffer and remove framebuffer
 	if (gbm.previousBo)
 	{
 		drmModeRmFB(drm.fd, gbm.previousFb);
 		gbm_surface_release_buffer(gbm.surface, gbm.previousBo);
 	}
-	//gbm_surface_release_buffer(gbm.surface, gbm.previousBo);
+
+	// Save current buffer as previous buffer
 	gbm.previousBo = bo;
 	gbm.previousFb = fb;
-	//lock.unlock();
 }
 
-void displayFrame(int w, int h)
-{
-	std::unique_lock<std::mutex> lock(renderMutex); //adding Mutex works great, but poor performance yeah
-	glClearColor(0, 0, 0, 0);
-	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
-
-	w = w/2;
-	
-	//Draw camera 1
-	
-	//glBindFramebuffer(FramebufferName);
-	glViewport(-30,-22,w,h); //-30 sind damit man nicht so schielt, die Objekte sind weiter vom median und weiter von der Person. die -22 sind gegen die Krümmung der Kamera, so eine Art finetuning.
-	glBindTexture(GL_TEXTURE_EXTERNAL_OES, FramebufferName2);
-	if (glGetError() != GL_NO_ERROR) {
-    std::cerr << "Error binding FramebufferName2 texture\n";
-	}
-	
-	//glBindFramebuffer(GL_FRAMEBUFFER, 0);    // do i need this?
-	glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
-	
-	//Draw camera 2
-	//glBindTexture(GL_TEXTURE_EXTERNAL_OES, FramebufferName2);
-	glViewport(w+30,0,w,h);
-	glBindTexture(GL_TEXTURE_EXTERNAL_OES, FramebufferName);
-	if (glGetError() != GL_NO_ERROR) {
-    std::cerr << "Error binding FramebufferName texture\n";
-	}
-	
-		//glBindFramebuffer(GL_FRAMEBUFFER, 0);    // do i need this?
-	glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
-
-	//EGLBoolean success [[maybe_unused]] = eglSwapBuffers(egl.display, egl.surface); //eglSwapBuffers(egl.display, egl.surface);
-	//if (display_mode == "DRM")
-	if (!eglSwapBuffers(egl.display, egl.surface)) {
-        std::cerr << "EGL buffer swap failed!\n";
-    }
-	
-	gbmSwapBuffers();
-	//Draw camera 1
-	//std::cout << "displayed frame\n";
-	
-}
-
-/* void displayFrame(int width, int height, int rotate)
+void displayFrame(int width, int height)
 {
 	glClearColor(0, 0, 0, 0);
 	glClear(GL_COLOR_BUFFER_BIT);
 	
-	if(0) {
-		height = height/2;
+	width = width/2;
+	
+	//Draw camera 1
+	glBindTexture(GL_TEXTURE_EXTERNAL_OES, egl.FramebufferName);
+	glViewport(0,0,width,height);
+	//glBindFramebuffer(GL_FRAMEBUFFER, 0);    // do i need this?
+	glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+	
+	//Draw camera 2
+	glBindTexture(GL_TEXTURE_EXTERNAL_OES, egl.FramebufferName2);
+	glViewport(width,0,width,height);
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);    // do i need this?
+	glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+	
+	eglSwapBuffers(egl.display, egl.surface);
+	//if (display_mode == "DRM")
+	gbmSwapBuffers();
 		
-		//Draw camera 1
-		glBindTexture(GL_TEXTURE_EXTERNAL_OES, egl.FramebufferName);
-		glViewport(0,0,width,height);
-		drawMesh();
-		
-		// Draw camera 2
-		glBindTexture(GL_TEXTURE_EXTERNAL_OES, egl.FramebufferName2);
-		glViewport(0,height,width,height);
-		glBindFramebuffer(GL_FRAMEBUFFER, 0);    // do i need this?
-		drawMesh();
-	}else{
-		width = width/2;
-		
-		//Draw camera 1
-		glBindTexture(GL_TEXTURE_EXTERNAL_OES, egl.FramebufferName);
-		glViewport(0,0,width,height);
-		drawMesh();
-		
-		// Draw camera 2
-		glBindTexture(GL_TEXTURE_EXTERNAL_OES, egl.FramebufferName2);
-		glViewport(width,0,width,height);
-		glBindFramebuffer(GL_FRAMEBUFFER, 0);    // do i need this?
-		drawMesh();
-	}
-} */
+	//std::cout << "displayed frame\n";
+}
 
 void gbmClean()
 {
@@ -688,7 +567,6 @@ void gbmClean()
 
     gbm_surface_destroy(gbm.surface);
     gbm_device_destroy(gbm.device);
-
 }
 
 void cleanup()

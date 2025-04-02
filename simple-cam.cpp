@@ -1,8 +1,10 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Copyright (C) 2022, Peyton Howe
+ * https://github.com/peyton-howe/simple-cam
  *
  * A simple dual-camera libcamera capture program
+ * Modified by Moritz Offermann for utilizing the rift as a night vision device
  */
 
 #include <iomanip>
@@ -12,10 +14,12 @@
 #include <boost/lexical_cast.hpp>
 #include <queue>
 #include <sys/mman.h>
+#include <mutex>
 
 #include "event_loop.h"
 #include "preview.h"
 
+std::mutex mainMutex;
 
 struct options
 {
@@ -51,16 +55,20 @@ static void processRequest2(Request *request);
 
 static void requestComplete(Request *request)
 {
+	std::unique_lock<std::mutex> lock(mainMutex);
 	if (request->status() == Request::RequestCancelled)
 		return;
 	loop.callLater(std::bind(&processRequest, request));
+	request->reuse(Request::ReuseBuffers);
 }
 
 static void requestComplete2(Request *request)
 {
+	std::unique_lock<std::mutex> lock(mainMutex);
     if (request->status() == Request::RequestCancelled)
 		return;
 	loop.callLater(std::bind(&processRequest2, request));
+	request->reuse(Request::ReuseBuffers);
 }
 
 static void processRequest(Request *request)
@@ -83,7 +91,7 @@ static void processRequest(Request *request)
 		FrameBuffer *buffer = bufferPair.second;
 		StreamConfiguration const &cfg = stream->configuration();
 		int fd = buffer->planes()[0].fd.get();
-		
+		std::unique_lock<std::mutex> lock(mainMutex);
 		makeBuffer(fd, cfg, buffer, 1);
 	}
 	
@@ -95,13 +103,14 @@ static void processRequest(Request *request)
 
 static void processRequest2(Request *request)
 {	
+	
 	const Request::BufferMap &buffers2 = request->buffers();
 	for (auto bufferPair : buffers2) {
 		const Stream *stream = bufferPair.first;
 		FrameBuffer *buffer2 = bufferPair.second;
 		StreamConfiguration const &cfg2 = stream->configuration();
 		int fd2 = buffer2->planes()[0].fd.get();
-		
+		std::unique_lock<std::mutex> lock(mainMutex);
 		makeBuffer(fd2, cfg2, buffer2, 2);
 	}
 	
@@ -110,8 +119,49 @@ static void processRequest2(Request *request)
 	cameras[1]->queueRequest(request);
 }
 
+/* void makeRequests(int i) 
+{
+    // Referenz auf frame_buffers[i] statt Kopie
+    auto &free_buffers = frame_buffers[i];
+
+    while (true)
+    {
+        for (StreamConfiguration &cfg : *configs[i])
+        {
+            Stream *stream = cfg.stream();
+            
+            // Prüfen, ob es genügend freie Buffer gibt
+            if (free_buffers[stream].empty())
+            {
+                std::cout << "Not enough free buffers for stream" << std::endl;
+                return;
+            }
+
+            // Erstelle eine neue Anfrage, wenn es der erste Stream ist
+            if (stream == configs[i]->at(0).stream())
+            {
+                std::unique_ptr<Request> request = cameras[i]->createRequest();
+                if (!request)
+                    throw std::runtime_error("failed to create request");
+
+                requests[i].push_back(std::move(request));
+            }
+
+            // Füge den Buffer hinzu
+            FrameBuffer *buffer = free_buffers[stream].front();
+            free_buffers[stream].pop();
+
+            if (requests[i].back()->addBuffer(stream, buffer) < 0)
+                throw std::runtime_error("failed to add buffer to request");
+        }
+
+        // Optional: Schleifenende-Bedingung hinzufügen, falls du nicht eine unendliche Schleife möchtest
+    }
+}*/
+
 void makeRequests(int i)
 {
+	std::unique_lock<std::mutex> lock(mainMutex);
 	auto free_buffers(frame_buffers[i]);
 	while (true)
 	{
@@ -154,9 +204,11 @@ void configureCamera(int i, options& params)
 	if (!configs[i])
 		std::cout << "failed to generate viewfinder configuration\n";
 	
+	
     StreamConfiguration &streamConfig = configs[i]->at(0);
 	std::cout << "Default viewfinder configuration is: " << streamConfig.toString() << std::endl;
 	
+	configs[i]->validate();
 	int val = cameras[i]->configure(configs[i].get());
     if (val) {
         std::cout << "CONFIGURATION FAILED!" << std::endl;
@@ -181,7 +233,9 @@ void configureCamera(int i, options& params)
 	configs[i]->at(0).size = size;
 	
 	configs[i]->at(0).bufferCount = params.buffer_count;
+	configs[i]->orientation = libcamera::Orientation::Rotate180;
 	
+
 	configs[i]->validate();
 	std::cout << "Validated viewfinder configuration is: "
 		  << streamConfig.toString() << std::endl;
@@ -230,6 +284,20 @@ void configureCamera(int i, options& params)
 	makeRequests(i);
 }
 
+void changeFocus(float focus)
+{
+	for(int i= 0; i< 2; i++){
+		for (std::unique_ptr<Request> &request : requests[i]){
+			ControlList &controls = request->controls();
+			controls.set(controls::LENS_POSITION, focus);
+			cameras[i]->queueRequest(request.get());
+		}
+	}
+	std::cout << "Focus changed to " << focus << std::endl;
+}
+
+
+
 int main(int argc, char **argv)
 {
 	options params = {
@@ -238,9 +306,9 @@ int main(int argc, char **argv)
 		.height = 0, //default
 		.prev_x = 0, 
 		.prev_y = 0, 
-		.prev_width = 1920, 
-		.prev_height = 1080,
-		.fps = 30.0,
+		.prev_width = 2160, 
+		.prev_height = 1440,
+		.fps = 60.0,
 		.shutterSpeed = 0,
 		.exposure = "normal",
 		.exposure_index = cam_exposure_index,
@@ -330,8 +398,18 @@ int main(int argc, char **argv)
 	int64_t frame_time = 1000000 / params.fps; // in us
 	
 	controls.set(controls::AeExposureMode, cam_exposure_index);
+	controls.set(controls::AeMeteringMode, 1); // 0 center, 1 matrix, 2 spot
+	// not supported controls.set(controls::AeFlickerMode, 2); // 0 off, 1 manual, 2 auto
 	controls.set(controls::ExposureTime, params.shutterSpeed);
 	controls.set(controls::FrameDurationLimits, libcamera::Span<const int64_t, 2>({ frame_time, frame_time }));
+
+
+
+	controls.set(controls::AF_MODE, 0); // 0 manual, 1 auto, 2 continuous
+	controls.set(controls::AF_METERING, 1); // 0 auto, 1 windows
+	controls.set(controls::AF_RANGE, 0); // 0 normal, 1 macro, 2 full
+	controls.set(controls::AF_SPEED, 1);
+	controls.set(controls::LENS_POSITION, 6.0f); // works with 6.0f the best, smaller values closer and viceversa
 	
 	//if (!controls.get(controls::Brightness)) // Adjust the brightness of the output images, in the range -1.0 to 1.0
 	//	controls.set(controls::Brightness, 0.0);

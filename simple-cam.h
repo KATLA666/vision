@@ -1,0 +1,1 @@
+void changeFocus(float focus);

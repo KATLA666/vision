@@ -5,6 +5,8 @@ project('simple-cam', 'c', 'cpp',
 		'cpp_std=c++17',
 	])
 
+drm_inc = include_directories('/usr/include/libdrm/')
+
 # simple-cam.cpp is the fully commented application
 src_files = files([
 	'simple-cam.cpp',
@@ -24,4 +26,4 @@ add_project_arguments(cpp_arguments, language : 'cpp')
 
 # simple-cam executable
 simple_cam = executable('simple-cam', src_files,
-                        dependencies : deps)
+                        dependencies : deps, include_directories: [drm_inc])

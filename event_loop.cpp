@@ -7,6 +7,7 @@
 
 #include "event_loop.h"
 #include "preview.h"
+#include "simple-cam.h"
 
 #include <assert.h>
 #include <event2/event.h>
@@ -15,6 +16,7 @@
 #include <algorithm>
 
 EventLoop *EventLoop::instance_ = nullptr;
+std::mutex loopMutex;
 
 EventLoop::EventLoop()
 {
@@ -42,6 +44,7 @@ int EventLoop::exec(int width, int height, int timeout)
 	int nFrames = 0;
 	int lastFrames = 0;
 	int droppedFrames = 0;
+	//int debugLensPos = 0;
 
 	//while (!exit_.load(std::memory_order_acquire)) {
 	while(1) {
@@ -58,7 +61,7 @@ int EventLoop::exec(int width, int height, int timeout)
 			//std::cout << "displaying frames \n";
 			//std::cout << "here doing stuff \n";
 			dispatchCalls();
-			//event_base_loop(event_, EVLOOP_NO_EXIT_ON_EMPTY);
+			event_base_loop(event_, EVLOOP_ONCE/* EVLOOP_NO_EXIT_ON_EMPTY */);
 			displayFrame(width, height);
 			nFrames++;
 			if (nFrames % 160 == 0)
@@ -73,6 +76,13 @@ int EventLoop::exec(int width, int height, int timeout)
 				printf("%d frames over %.2fs (%.1ffps)! \n", frames, elapsedS, fps);
 				printf("%d dropped frames over %.2fs! \n", droppedFrames, elapsedS);
 				droppedFrames = 0;
+				/* changeFocus(debugLensPos);
+				if(debugLensPos == 10){
+					debugLensPos = 0;
+				}
+				else{
+					debugLensPos++;
+				} */
 			}
 		}
 	}
@@ -120,7 +130,7 @@ void EventLoop::callLater(const std::function<void()> &func)
 	interrupt();
 }
 
-void EventLoop::dispatchCalls()
+/* void EventLoop::dispatchCalls()
 {
 	std::unique_lock<std::mutex> locker(lock_);
 	for (auto iter = calls_.begin(); iter != calls_.end(); ) {
@@ -131,4 +141,19 @@ void EventLoop::dispatchCalls()
 		call();
 		locker.lock();
 	}
+} */
+void EventLoop::dispatchCalls()
+{
+    std::list<std::function<void()>> localCalls;
+    {
+        std::unique_lock<std::mutex> locker(lock_);
+        localCalls.swap(calls_);
+    }
+
+    for (auto& call : localCalls) {
+        call();
+    }
 }
+
+
+
